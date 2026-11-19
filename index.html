@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>On Topic Timer</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000; color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    user-select: none; -webkit-user-select: none; touch-action: manipulation;
+  }
+  .screen {
+    position: fixed; inset: 0; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 4vh; padding: 4vmin; text-align: center;
+  }
+  body[data-state="setup"] #setup,
+  body[data-state="running"] #running,
+  body[data-state="ended"] #ended { display: flex; }
+
+  #setup label { font-size: 5vmin; color: #aaa; }
+  .fields { display: flex; align-items: center; gap: 2vmin; font-size: 14vmin; }
+  .fields input {
+    width: 2.4ch; padding: 0.1em; font: inherit; text-align: center;
+    color: #fff; background: #000; border: 2px solid #555; border-radius: 0.1em;
+    font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield;
+  }
+  .fields input::-webkit-outer-spin-button,
+  .fields input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  #minutes { width: 3.4ch; }
+  #start {
+    font: inherit; font-size: 8vmin; font-weight: 700; padding: 0.4em 1.4em;
+    color: #000; background: #fff; border: 0; border-radius: 0.2em;
+  }
+
+  #time {
+    font-size: min(30vw, 45vh); font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  #topic {
+    font: inherit; font-size: min(13vw, 18vh); font-weight: 800; line-height: 1;
+    padding: 0.5em 0.3em; background: none; border: 0; color: #00d000;
+  }
+  #topic.off { color: #ff2020; }
+  #reset {
+    position: absolute; top: max(2vmin, env(safe-area-inset-top)); right: 3vmin;
+    font: inherit; font-size: 7vmin; line-height: 1; padding: 0.3em 0.4em;
+    color: #555; background: none; border: 0;
+  }
+
+  #ended { background: #e00000; color: #000; }
+  #ended div { font-size: min(17vw, 30vh); font-weight: 900; line-height: 1.05; }
+</style>
+</head>
+<body data-state="setup">
+
+<form id="setup" class="screen">
+  <label for="minutes">Minutes : Seconds</label>
+  <div class="fields">
+    <input id="minutes" type="number" inputmode="numeric" min="0" max="999" value="30">
+    <span>:</span>
+    <input id="seconds" type="number" inputmode="numeric" min="0" max="59" value="00">
+  </div>
+  <button id="start" type="submit">START</button>
+</form>
+
+<div id="running" class="screen">
+  <button id="reset" type="button" aria-label="Reset">✕</button>
+  <div id="time">0:00</div>
+  <button id="topic" type="button">ON TOPIC</button>
+</div>
+
+<div id="ended" class="screen">
+  <div>END<br>MEETING</div>
+</div>
+
+<script>
+(() => {
+  const OFF_TOPIC_RATE = 5;
+  const STORAGE_KEY = 'on-topic-timer.duration';
+
+  const $ = (id) => document.getElementById(id);
+  const minutesInput = $('minutes');
+  const secondsInput = $('seconds');
+  const timeEl = $('time');
+  const topicEl = $('topic');
+
+  let remainingMs = 0;
+  let lastTick = 0;
+  let offTopic = false;
+  let frame = 0;
+  let wakeLock = null;
+
+  const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+  if (saved > 0) {
+    minutesInput.value = Math.floor(saved / 60);
+    secondsInput.value = String(saved % 60).padStart(2, '0');
+  }
+
+  function setState(state) {
+    document.body.dataset.state = state;
+  }
+
+  function format(ms) {
+    const total = Math.ceil(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = String(total % 60).padStart(2, '0');
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+  }
+
+  function advance() {
+    const now = Date.now();
+    remainingMs -= (now - lastTick) * (offTopic ? OFF_TOPIC_RATE : 1);
+    lastTick = now;
+  }
+
+  function renderTopic() {
+    topicEl.textContent = offTopic ? 'OFF TOPIC' : 'ON TOPIC';
+    topicEl.classList.toggle('off', offTopic);
+  }
+
+  function tick() {
+    advance();
+    if (remainingMs <= 0) {
+      setState('ended');
+      return;
+    }
+    timeEl.textContent = format(remainingMs);
+    frame = requestAnimationFrame(tick);
+  }
+
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+    } catch (e) {
+      wakeLock = null;
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+
+  function start(event) {
+    event.preventDefault();
+    const total = (parseInt(minutesInput.value, 10) || 0) * 60 + (parseInt(secondsInput.value, 10) || 0);
+    if (total <= 0) return;
+    localStorage.setItem(STORAGE_KEY, String(total));
+    document.activeElement?.blur();
+    remainingMs = total * 1000;
+    lastTick = Date.now();
+    offTopic = false;
+    renderTopic();
+    timeEl.textContent = format(remainingMs);
+    setState('running');
+    acquireWakeLock();
+    frame = requestAnimationFrame(tick);
+  }
+
+  function reset() {
+    cancelAnimationFrame(frame);
+    releaseWakeLock();
+    setState('setup');
+  }
+
+  $('setup').addEventListener('submit', start);
+  $('reset').addEventListener('click', reset);
+  $('ended').addEventListener('click', reset);
+  topicEl.addEventListener('click', () => {
+    advance();
+    offTopic = !offTopic;
+    renderTopic();
+  });
+  for (const input of [minutesInput, secondsInput]) {
+    input.addEventListener('focus', () => input.select());
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || document.body.dataset.state === 'setup') return;
+    acquireWakeLock();
+    if (document.body.dataset.state === 'running') {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(tick);
+    }
+  });
+})();
+</script>
+</body>
+</html>
